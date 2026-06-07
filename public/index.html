@@ -2118,7 +2118,7 @@ async function renderWorkerBills() {
                 <td style="max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px">${b.description}</td>
                 <td><span class="badge badge-${b.status==='paid'?'approved':b.status}">${b.status}</span></td>
                 <td>${b.bill_image
-                  ? `<a href="${b.bill_image}" target="_blank" style="color:var(--blue);font-size:12px"><i class="ti ti-photo"></i> View</a>`
+                  ? `<button class="btn btn-ghost btn-sm" onclick="viewImg('${b.id}_bill')"><i class="ti ti-photo"></i> View</button>`
                   : '—'}</td>
               </tr>`).join('')}
             </tbody></table></div>`}
@@ -2126,8 +2126,19 @@ async function renderWorkerBills() {
   `));
   attachNav();
 
-  // Image helpers
-  let billImgB64 = '', payImgB64 = '';
+  // Store images in JS map — never put base64 in HTML attributes
+  const imgStore = {};
+  bills.forEach(b => {
+    if (b.bill_image)    imgStore[b.id + '_bill'] = b.bill_image;
+    if (b.payment_proof) imgStore[b.id + '_pay']  = b.payment_proof;
+  });
+  window.viewImg = (key) => {
+    const src = imgStore[key];
+    if (!src) return;
+    const w = window.open('', '_blank');
+    w.document.write(`<html><body style="margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`);
+    w.document.close();
+  };
   function setupImgInput(inputId, previewId, zoneId, onLoad) {
     document.getElementById(inputId).addEventListener('change', e => {
       const file = e.target.files[0];
@@ -2187,8 +2198,8 @@ async function renderMgrBills() {
       <td style="max-width:140px;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${b.description}</td>
       <td style="font-size:12px">${fmtDate(b.submitted_date)}</td>
       <td>
-        ${b.bill_image ? `<a href="${b.bill_image}" target="_blank" class="btn btn-ghost btn-sm"><i class="ti ti-file-invoice"></i> Bill</a>` : '—'}
-        ${b.payment_proof ? `<a href="${b.payment_proof}" target="_blank" class="btn btn-ghost btn-sm" style="margin-left:4px"><i class="ti ti-qrcode"></i> UPI</a>` : ''}
+        ${b.bill_image    ? `<button class="btn btn-ghost btn-sm" onclick="mgrViewImg('${b.id}_bill')"><i class="ti ti-file-invoice"></i> Bill</button>` : '—'}
+        ${b.payment_proof ? `<button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="mgrViewImg('${b.id}_pay')"><i class="ti ti-qrcode"></i> UPI</button>` : ''}
       </td>
       <td><span class="badge badge-${b.status==='paid'?'approved':b.status}">${b.status}</span></td>
       ${showActions ? `<td style="white-space:nowrap">
@@ -2257,6 +2268,20 @@ async function renderMgrBills() {
     </div>
   `, badges));
   attachNav();
+
+  // Image store — keeps base64 out of HTML attributes (prevents data corruption / page breaks)
+  const mgrImgStore = {};
+  allBills.forEach(b => {
+    if (b.bill_image)    mgrImgStore[b.id + '_bill'] = b.bill_image;
+    if (b.payment_proof) mgrImgStore[b.id + '_pay']  = b.payment_proof;
+  });
+  window.mgrViewImg = (key) => {
+    const src = mgrImgStore[key];
+    if (!src) return;
+    const w = window.open('', '_blank');
+    w.document.write(`<html><body style="margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"></body></html>`);
+    w.document.close();
+  };
 
   // Approve / reject
   document.querySelectorAll('[data-approve-bill]').forEach(b => b.onclick = async () => {
