@@ -1,22 +1,33 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { getDb, query, run, get } = require('./database');
+const multer = require('multer');
+const fs = require('fs');
+const { getDb, query, run, get, hashPin, verifyPin } = require('./database');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Ensure uploads dir exists
+const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// Multer for bill images (stored as base64 in DB — no disk file needed for small receipts)
+// We accept base64 from frontend directly to keep it simple / no extra infra needed.
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 app.post('/api/login', async (req, res) => {
   await getDb();
   const { name, pin, role } = req.body;
   const user = get(
-    `SELECT * FROM users WHERE LOWER(name)=LOWER(?) AND pin=? AND role=?`,
-    [name, pin, role]
+    `SELECT * FROM users WHERE LOWER(name)=LOWER(?) AND role=?`,
+    [name, role]
   );
   if (!user) return res.status(401).json({ error: 'Invalid name or PIN' });
+  const ok = await verifyPin(pin, user.pin);
+  if (!ok) return res.status(401).json({ error: 'Invalid name or PIN' });
   const { pin: _, ...safe } = user;
   res.json(safe);
 });
@@ -35,9 +46,11 @@ app.patch('/api/users/:id/profile', async (req, res) => {
   const user = get(`SELECT * FROM users WHERE id=?`, [req.params.id]);
   if (!user) return res.status(404).json({ error: 'User not found' });
   if (new_pin) {
-    if (user.pin !== current_pin) return res.status(401).json({ error: 'Current PIN is incorrect' });
+    const ok = await verifyPin(current_pin, user.pin);
+    if (!ok) return res.status(401).json({ error: 'Current PIN is incorrect' });
     if (new_pin.length < 4) return res.status(400).json({ error: 'New PIN must be at least 4 digits' });
-    run(`UPDATE users SET phone=?, pin=? WHERE id=?`, [phone ?? user.phone, new_pin, req.params.id]);
+    const hashed = await hashPin(new_pin);
+    run(`UPDATE users SET phone=?, pin=? WHERE id=?`, [phone ?? user.phone, hashed, req.params.id]);
   } else {
     run(`UPDATE users SET phone=? WHERE id=?`, [phone ?? user.phone, req.params.id]);
   }
@@ -59,9 +72,10 @@ app.post('/api/users', async (req, res) => {
   const existing = get(`SELECT id FROM users WHERE LOWER(name)=LOWER(?) AND role=?`, [name, role]);
   if (existing) return res.status(409).json({ error: 'A user with this name and role already exists' });
   const id = (role === 'worker' ? 'w' : 'm') + Date.now();
+  const hashed = await hashPin(pin);
   run(
     `INSERT INTO users (id, name, pin, role, wage, phone) VALUES (?,?,?,?,?,?)`,
-    [id, name.trim(), pin, role, Number(wage) || 0, phone || '']
+    [id, name.trim(), hashed, role, Number(wage) || 0, phone || '']
   );
   res.json({ id, name, role, wage: Number(wage) || 0, phone: phone || '' });
 });
@@ -70,7 +84,6 @@ app.delete('/api/users/:id', async (req, res) => {
   await getDb();
   const user = get(`SELECT * FROM users WHERE id=?`, [req.params.id]);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  // Prevent deleting the currently active manager (guard: frontend should not send self-delete, but double-check)
   run(`DELETE FROM worker_projects WHERE worker_id=?`, [req.params.id]);
   run(`DELETE FROM users WHERE id=?`, [req.params.id]);
   res.json({ success: true });
@@ -81,9 +94,11 @@ app.patch('/api/users/:id', async (req, res) => {
   const { name, pin, wage, phone } = req.body;
   const user = get(`SELECT * FROM users WHERE id=?`, [req.params.id]);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  let pinToStore = user.pin;
+  if (pin) pinToStore = await hashPin(pin);
   run(
     `UPDATE users SET name=?, pin=?, wage=?, phone=? WHERE id=?`,
-    [name || user.name, pin || user.pin, Number(wage) ?? user.wage, phone ?? user.phone, req.params.id]
+    [name || user.name, pinToStore, Number(wage) ?? user.wage, phone ?? user.phone, req.params.id]
   );
   res.json({ success: true });
 });
@@ -187,12 +202,14 @@ app.get('/api/attendance', async (req, res) => {
 app.post('/api/attendance', async (req, res) => {
   await getDb();
   const { worker_id, date, status, time, project_id } = req.body;
+  // Project is required for workers marking their own attendance
+  if (!project_id) return res.status(400).json({ error: 'Please select a project before marking attendance' });
   const existing = get(`SELECT id FROM attendance WHERE worker_id=? AND date=?`, [worker_id, date]);
   if (existing) return res.status(409).json({ error: 'Attendance already marked for today' });
   run(
     `INSERT INTO attendance (worker_id, date, status, time, project_id, confirmed)
      VALUES (?,?,?,?,?,0)`,
-    [worker_id, date, status, time, project_id || null]
+    [worker_id, date, status, time, project_id]
   );
   res.json({ success: true });
 });
@@ -337,6 +354,60 @@ app.patch('/api/advances/:id', async (req, res) => {
   res.json({ success: true });
 });
 
+// ── BILLS ─────────────────────────────────────────────────────────────────────
+app.get('/api/bills', async (req, res) => {
+  await getDb();
+  const { worker_id, status } = req.query;
+  let sql = `
+    SELECT b.*, u.name as worker_name, p.name as project_name, p.location as project_location
+    FROM bills b
+    JOIN users u ON b.worker_id=u.id
+    JOIN projects p ON b.project_id=p.id
+    WHERE 1=1
+  `;
+  const params = [];
+  if (worker_id) { sql += ` AND b.worker_id=?`; params.push(worker_id); }
+  if (status)    { sql += ` AND b.status=?`;    params.push(status); }
+  sql += ` ORDER BY b.submitted_date DESC`;
+  res.json(query(sql, params));
+});
+
+app.post('/api/bills', async (req, res) => {
+  await getDb();
+  const { worker_id, project_id, amount, category, description, bill_image, payment_proof } = req.body;
+  if (!worker_id || !project_id || !amount || !category || !description) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+  const id = 'b' + Date.now();
+  const submitted_date = new Date().toISOString().split('T')[0];
+  run(
+    `INSERT INTO bills (id, worker_id, project_id, amount, category, description, bill_image, payment_proof, status, submitted_date)
+     VALUES (?,?,?,?,?,?,?,?,'pending',?)`,
+    [id, worker_id, project_id, Number(amount), category, description, bill_image || '', payment_proof || '', submitted_date]
+  );
+  res.json({ id, success: true });
+});
+
+app.patch('/api/bills/:id', async (req, res) => {
+  await getDb();
+  const { status, actioned_by, payment_proof } = req.body;
+  const bill = get(`SELECT * FROM bills WHERE id=?`, [req.params.id]);
+  if (!bill) return res.status(404).json({ error: 'Bill not found' });
+  const now = new Date().toISOString();
+  if (status === 'paid') {
+    run(
+      `UPDATE bills SET status=?, actioned_by=?, actioned_at=?, paid_at=?, payment_proof=? WHERE id=?`,
+      [status, actioned_by, now, now, payment_proof || bill.payment_proof, req.params.id]
+    );
+  } else {
+    run(
+      `UPDATE bills SET status=?, actioned_by=?, actioned_at=? WHERE id=?`,
+      [status, actioned_by, now, req.params.id]
+    );
+  }
+  res.json({ success: true });
+});
+
 // ── REPORT DATA ───────────────────────────────────────────────────────────────
 app.get('/api/report', async (req, res) => {
   await getDb();
@@ -359,8 +430,13 @@ app.get('/api/report', async (req, res) => {
   const workerProjects = query(
     `SELECT wp.worker_id, wp.project_id, p.name, p.location FROM worker_projects wp JOIN projects p ON wp.project_id=p.id`
   );
+  const bills = query(
+    `SELECT b.*, p.name as project_name FROM bills b JOIN projects p ON b.project_id=p.id
+     WHERE strftime('%m',b.submitted_date)=? AND strftime('%Y',b.submitted_date)=?`,
+    [mm, String(year)]
+  );
 
-  res.json({ workers, attendance, leaves, advances, workerProjects });
+  res.json({ workers, attendance, leaves, advances, workerProjects, bills });
 });
 
 // Serve frontend for all non-API routes

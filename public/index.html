@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WorkTrack — Salary Management</title>
+<title>WorkTrack</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/tabler-icons.min.css">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -414,7 +414,7 @@ function showLogin() {
       <div class="login-card">
         <div class="brand">
           <div class="brand-icon"><i class="ti ti-building-factory-2"></i></div>
-          <div><div class="brand-name">WorkTrack</div><div class="brand-sub">Monthly Salary Management</div></div>
+          <div><div class="brand-name">WorkTrack</div></div>
         </div>
         <div class="role-tabs">
           <button class="role-tab ${S.loginRole==='worker'?'active':''}" id="tab-worker"><i class="ti ti-user"></i> Worker</button>
@@ -453,6 +453,7 @@ function workerNavItems() {
     { id:'worker-attendance',icon:'ti-calendar-check',   label:'Mark Attendance' },
     { id:'worker-leaves',    icon:'ti-calendar-off',     label:'Apply for Leave' },
     { id:'worker-advance',   icon:'ti-cash',             label:'Request Advance' },
+    { id:'worker-bills',     icon:'ti-receipt',          label:'Submit Bill' },
     { id:'worker-history',   icon:'ti-history',          label:'My History' },
     { id:'worker-profile',   icon:'ti-user-circle',      label:'My Profile' },
   ];
@@ -463,6 +464,7 @@ function mgrNavItems(badges) {
     { id:'mgr-attendance', icon:'ti-calendar-check',   label:'Confirm Attendance', badge: badges.att },
     { id:'mgr-leaves',     icon:'ti-calendar-off',     label:'Leave Requests',     badge: badges.leaves },
     { id:'mgr-advances',   icon:'ti-cash',             label:'Advance Requests',   badge: badges.adv },
+    { id:'mgr-bills',      icon:'ti-receipt',          label:'Bill Expenses',      badge: badges.bills },
     { id:'mgr-report',     icon:'ti-file-invoice',     label:'Reports' },
     { id:'mgr-workers',    icon:'ti-users',            label:'Workers' },
     { id:'mgr-projects',   icon:'ti-building-factory-2', label:'Projects' },
@@ -578,12 +580,14 @@ async function showPage(page) {
     else if (page === 'worker-attendance') await renderWorkerAttendance();
     else if (page === 'worker-leaves')     await renderWorkerLeaves();
     else if (page === 'worker-advance')    await renderWorkerAdvance();
+    else if (page === 'worker-bills')      await renderWorkerBills();
     else if (page === 'worker-history')    await renderWorkerHistory();
     else if (page === 'worker-profile')    await renderWorkerProfile();
     else if (page === 'mgr-dashboard')     await renderMgrDashboard();
     else if (page === 'mgr-attendance')    await renderMgrAttendance();
     else if (page === 'mgr-leaves')        await renderMgrLeaves();
     else if (page === 'mgr-advances')      await renderMgrAdvances();
+    else if (page === 'mgr-bills')         await renderMgrBills();
     else if (page === 'mgr-report')        await renderMgrReport();
     else if (page === 'mgr-workers')       await renderMgrWorkers();
     else if (page === 'mgr-projects')      await renderMgrProjects();
@@ -781,9 +785,10 @@ async function renderWorkerAttendance() {
   }
 
   async function markAtt(status) {
-    const projId = document.getElementById('att-proj')?.value || currentProjectId;
+    const projId = document.getElementById('att-proj')?.value || '';
+    if (!projId) { showAlert('Please select a project before marking attendance.', 'warning'); return; }
     try {
-      await POST('/api/attendance', { worker_id: S.user.id, date: today(), status, time: nowTime(), project_id: projId || null });
+      await POST('/api/attendance', { worker_id: S.user.id, date: today(), status, time: nowTime(), project_id: projId });
       showAlert(status==='present'?'Attendance marked as Present! ✓':'Absence recorded.');
       showPage('worker-attendance');
     } catch(e) { showAlert(e.message, 'error'); }
@@ -958,14 +963,15 @@ async function renderWorkerHistory() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 async function getBadges() {
-  const [leaves, advances, att] = await Promise.all([
+  const [leaves, advances, att, bills] = await Promise.all([
     GET('/api/leaves?status=pending'),
     GET('/api/advances?status=pending'),
     GET(`/api/attendance?date=${today()}`),
+    GET('/api/bills?status=pending'),
   ]);
   const workers = await GET('/api/workers');
   const unconfirmed = att.filter(a => !a.confirmed).length;
-  return { att: unconfirmed, leaves: leaves.length, adv: advances.length };
+  return { att: unconfirmed, leaves: leaves.length, adv: advances.length, bills: bills.length };
 }
 
 async function renderMgrDashboard() {
@@ -2029,6 +2035,276 @@ async function renderMgrUserManagement() {
     } catch(e) { showAlert(e.message, 'error'); }
   };
   modal.onclick = e => { if (e.target === modal) modal.style.display = 'none'; };
+}
+
+// ── WORKER BILLS ──────────────────────────────────────────────────────────────
+async function renderWorkerBills() {
+  const [bills, projects] = await Promise.all([
+    GET(`/api/bills?worker_id=${S.user.id}`),
+    GET('/api/projects'),
+  ]);
+  const activeProjects = projects.filter(p => p.status === 'active');
+
+  const BILL_CATS = ['Materials','Transport','Food & Accommodation','Tools & Equipment','Site Safety','Other'];
+
+  render(workerLayout(`
+    <div class="page-hd"><div><div class="page-title">Submit Bill / Expense</div>
+    <div class="page-sub">Upload bills for company-reimbursable expenses</div></div></div>
+
+    <div class="card">
+      <div class="card-title">New Bill Submission</div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Project</label>
+          <select id="bill-proj">
+            <option value="">— Select project —</option>
+            ${activeProjects.map(p=>`<option value="${p.id}">${p.name} — ${p.location}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Category</label>
+          <select id="bill-cat">
+            ${BILL_CATS.map(c=>`<option>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field">
+          <label>Amount (₹)</label>
+          <input type="number" id="bill-amount" placeholder="e.g. 850" min="1">
+        </div>
+        <div class="form-field">
+          <label>Description</label>
+          <input type="text" id="bill-desc" placeholder="What is this expense for?">
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>Bill / Receipt Image <span style="color:var(--text3);font-weight:400;font-size:11px">(photo of bill or invoice)</span></label>
+        <div id="bill-img-zone" style="border:2px dashed var(--border);border-radius:10px;padding:1.25rem;text-align:center;cursor:pointer;background:var(--bg);transition:border-color .15s" onclick="document.getElementById('bill-img-input').click()">
+          <i class="ti ti-file-upload" style="font-size:28px;color:var(--text3)"></i>
+          <div style="font-size:13px;color:var(--text2);margin-top:6px">Tap to upload bill photo</div>
+          <div style="font-size:11.5px;color:var(--text3)">JPG, PNG — max 5MB</div>
+          <img id="bill-img-preview" style="display:none;max-width:100%;max-height:200px;border-radius:8px;margin-top:10px;object-fit:contain">
+        </div>
+        <input type="file" id="bill-img-input" accept="image/*" style="display:none">
+      </div>
+
+      <div class="form-field">
+        <label>UPI/Payment Screenshot <span style="color:var(--text3);font-weight:400;font-size:11px">(optional — if already paid by you)</span></label>
+        <div id="pay-img-zone" style="border:2px dashed var(--border);border-radius:10px;padding:1.25rem;text-align:center;cursor:pointer;background:var(--bg);transition:border-color .15s" onclick="document.getElementById('pay-img-input').click()">
+          <i class="ti ti-qrcode" style="font-size:28px;color:var(--text3)"></i>
+          <div style="font-size:13px;color:var(--text2);margin-top:6px">Tap to upload payment proof</div>
+          <img id="pay-img-preview" style="display:none;max-width:100%;max-height:200px;border-radius:8px;margin-top:10px;object-fit:contain">
+        </div>
+        <input type="file" id="pay-img-input" accept="image/*" style="display:none">
+      </div>
+
+      <button class="btn btn-amber" id="bill-submit"><i class="ti ti-send"></i> Submit Bill</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">My Submitted Bills</div>
+      ${bills.length === 0
+        ? `<div class="empty-state"><i class="ti ti-receipt"></i><p>No bills submitted yet</p></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Project</th><th>Category</th><th>Amount</th><th>Description</th><th>Status</th><th>Receipt</th></tr></thead>
+            <tbody>${bills.map(b=>`
+              <tr>
+                <td style="font-size:12.5px">${fmtDate(b.submitted_date)}</td>
+                <td style="font-size:12.5px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${b.project_name}</td>
+                <td><span class="badge" style="background:var(--bg3);color:var(--text)">${b.category}</span></td>
+                <td style="font-weight:700;color:var(--amber-d)">₹${Number(b.amount).toLocaleString('en-IN')}</td>
+                <td style="max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12.5px">${b.description}</td>
+                <td><span class="badge badge-${b.status==='paid'?'approved':b.status}">${b.status}</span></td>
+                <td>${b.bill_image
+                  ? `<a href="${b.bill_image}" target="_blank" style="color:var(--blue);font-size:12px"><i class="ti ti-photo"></i> View</a>`
+                  : '—'}</td>
+              </tr>`).join('')}
+            </tbody></table></div>`}
+    </div>
+  `));
+  attachNav();
+
+  // Image helpers
+  let billImgB64 = '', payImgB64 = '';
+  function setupImgInput(inputId, previewId, zoneId, onLoad) {
+    document.getElementById(inputId).addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) { showAlert('Image too large (max 5MB).', 'warning'); return; }
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const b64 = ev.target.result;
+        document.getElementById(previewId).src = b64;
+        document.getElementById(previewId).style.display = 'block';
+        document.getElementById(zoneId).style.borderColor = 'var(--amber)';
+        onLoad(b64);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  setupImgInput('bill-img-input', 'bill-img-preview', 'bill-img-zone', b64 => { billImgB64 = b64; });
+  setupImgInput('pay-img-input',  'pay-img-preview',  'pay-img-zone',  b64 => { payImgB64  = b64; });
+
+  document.getElementById('bill-submit').onclick = async () => {
+    const project_id  = document.getElementById('bill-proj').value;
+    const category    = document.getElementById('bill-cat').value;
+    const amount      = document.getElementById('bill-amount').value;
+    const description = document.getElementById('bill-desc').value.trim();
+    if (!project_id)  { showAlert('Please select a project.', 'warning'); return; }
+    if (!amount || Number(amount) < 1) { showAlert('Please enter a valid amount.', 'warning'); return; }
+    if (!description) { showAlert('Please add a description.', 'warning'); return; }
+    try {
+      await POST('/api/bills', {
+        worker_id: S.user.id, project_id, amount: Number(amount),
+        category, description,
+        bill_image: billImgB64,
+        payment_proof: payImgB64,
+      });
+      showAlert('Bill submitted successfully!');
+      showPage('worker-bills');
+    } catch(e) { showAlert(e.message, 'error'); }
+  };
+}
+
+// ── MANAGER BILLS ─────────────────────────────────────────────────────────────
+async function renderMgrBills() {
+  const [allBills, badges] = await Promise.all([GET('/api/bills'), getBadges()]);
+  const pending   = allBills.filter(b => b.status === 'pending');
+  const approved  = allBills.filter(b => b.status === 'approved');
+  const paid      = allBills.filter(b => b.status === 'paid');
+  const rejected  = allBills.filter(b => b.status === 'rejected');
+  const totalPending = pending.reduce((s,b) => s + Number(b.amount), 0);
+  const totalPaid    = paid.reduce((s,b) => s + Number(b.amount), 0);
+
+  function billRow(b, showActions) {
+    return `<tr>
+      <td><div class="flex-c"><div class="avatar">${initials(b.worker_name)}</div>${b.worker_name}</div></td>
+      <td style="font-size:12px;max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${b.project_name}</td>
+      <td><span class="badge" style="background:var(--bg3);color:var(--text)">${b.category}</span></td>
+      <td style="font-weight:700;color:var(--amber-d)">₹${Number(b.amount).toLocaleString('en-IN')}</td>
+      <td style="max-width:140px;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${b.description}</td>
+      <td style="font-size:12px">${fmtDate(b.submitted_date)}</td>
+      <td>
+        ${b.bill_image ? `<a href="${b.bill_image}" target="_blank" class="btn btn-ghost btn-sm"><i class="ti ti-file-invoice"></i> Bill</a>` : '—'}
+        ${b.payment_proof ? `<a href="${b.payment_proof}" target="_blank" class="btn btn-ghost btn-sm" style="margin-left:4px"><i class="ti ti-qrcode"></i> UPI</a>` : ''}
+      </td>
+      <td><span class="badge badge-${b.status==='paid'?'approved':b.status}">${b.status}</span></td>
+      ${showActions ? `<td style="white-space:nowrap">
+        <button class="btn btn-teal btn-sm" data-approve-bill="${b.id}"><i class="ti ti-check"></i> Approve</button>
+        <button class="btn btn-red btn-sm" style="margin-left:4px" data-reject-bill="${b.id}"><i class="ti ti-x"></i> Reject</button>
+      </td>` : ''}
+      ${b.status === 'approved' ? `<td style="white-space:nowrap">
+        <button class="btn btn-green btn-sm" data-pay-bill="${b.id}"><i class="ti ti-cash"></i> Mark Paid</button>
+      </td>` : (showActions ? '' : '<td>—</td>')}
+    </tr>`;
+  }
+
+  const tableHead = (extraCol) => `<thead><tr><th>Worker</th><th>Project</th><th>Category</th><th>Amount</th><th>Description</th><th>Date</th><th>Attachments</th><th>Status</th>${extraCol?`<th>Action</th>`:''}</tr></thead>`;
+
+  render(mgrLayout(`
+    <div class="page-hd"><div><div class="page-title">Bill Expenses</div>
+    <div class="page-sub">Review and reimburse worker-submitted bills</div></div></div>
+
+    <div class="stat-grid" style="margin-bottom:1.25rem">
+      <div class="stat"><div class="stat-label">Pending Review</div><div class="stat-val c-amber">${pending.length}</div><div class="stat-sub">₹${totalPending.toLocaleString('en-IN')}</div></div>
+      <div class="stat"><div class="stat-label">Approved (to pay)</div><div class="stat-val c-blue">${approved.length}</div></div>
+      <div class="stat"><div class="stat-label">Total Paid Out</div><div class="stat-val c-teal">₹${totalPaid.toLocaleString('en-IN')}</div></div>
+      <div class="stat"><div class="stat-label">Rejected</div><div class="stat-val c-red">${rejected.length}</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Pending Approval (${pending.length})</div>
+      ${pending.length === 0
+        ? `<div class="empty-state"><i class="ti ti-receipt"></i><p>No pending bills</p></div>`
+        : `<div class="table-wrap"><table>${tableHead(true)}<tbody>${pending.map(b=>billRow(b,true)).join('')}</tbody></table></div>`}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Approved — Awaiting Payment (${approved.length})</div>
+      ${approved.length === 0
+        ? `<div class="empty-state"><i class="ti ti-cash"></i><p>No approved bills pending payment</p></div>`
+        : `<div class="table-wrap"><table>${tableHead(false)}<tbody>${approved.map(b=>billRow(b,false)).join('')}</tbody></table></div>`}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Paid Bills (${paid.length})</div>
+      ${paid.length === 0
+        ? `<div class="empty-state"><i class="ti ti-checks"></i><p>No bills paid yet</p></div>`
+        : `<div class="table-wrap"><table>${tableHead(false)}<tbody>${paid.map(b=>billRow(b,false)).join('')}</tbody></table></div>`}
+    </div>
+
+    <!-- Pay modal: attach UPI screenshot when marking as paid -->
+    <div id="pay-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center">
+      <div style="background:var(--card);border-radius:16px;padding:1.75rem;width:100%;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,.2);margin:1rem">
+        <div style="font-size:17px;font-weight:700;margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center">
+          Mark as Paid <button id="pay-close" style="background:none;border:none;cursor:pointer;font-size:22px;color:var(--text2)">×</button>
+        </div>
+        <div class="alert alert-info" style="margin-bottom:1rem"><i class="ti ti-info-circle"></i>Upload UPI receipt or payment screenshot as proof.</div>
+        <div id="pay-proof-zone" style="border:2px dashed var(--border);border-radius:10px;padding:1.25rem;text-align:center;cursor:pointer;background:var(--bg)" onclick="document.getElementById('pay-proof-input').click()">
+          <i class="ti ti-qrcode" style="font-size:28px;color:var(--text3)"></i>
+          <div style="font-size:13px;color:var(--text2);margin-top:6px">Tap to upload payment proof</div>
+          <img id="pay-proof-preview" style="display:none;max-width:100%;max-height:180px;border-radius:8px;margin-top:10px;object-fit:contain">
+        </div>
+        <input type="file" id="pay-proof-input" accept="image/*" style="display:none">
+        <input type="hidden" id="pay-bill-id">
+        <div style="display:flex;gap:10px;margin-top:1.25rem">
+          <button class="btn btn-teal" id="pay-confirm" style="flex:1"><i class="ti ti-check"></i> Confirm Payment</button>
+          <button class="btn btn-ghost" id="pay-cancel" style="flex:1">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `, badges));
+  attachNav();
+
+  // Approve / reject
+  document.querySelectorAll('[data-approve-bill]').forEach(b => b.onclick = async () => {
+    await PATCH(`/api/bills/${b.dataset.approveBill}`, { status: 'approved', actioned_by: S.user.id });
+    showAlert('Bill approved!'); showPage('mgr-bills');
+  });
+  document.querySelectorAll('[data-reject-bill]').forEach(b => b.onclick = async () => {
+    await PATCH(`/api/bills/${b.dataset.rejectBill}`, { status: 'rejected', actioned_by: S.user.id });
+    showAlert('Bill rejected.', 'warning'); showPage('mgr-bills');
+  });
+
+  // Pay modal
+  const payModal = document.getElementById('pay-modal');
+  let payProofB64 = '';
+  document.querySelectorAll('[data-pay-bill]').forEach(b => {
+    b.onclick = () => {
+      document.getElementById('pay-bill-id').value = b.dataset.payBill;
+      payProofB64 = '';
+      document.getElementById('pay-proof-preview').style.display = 'none';
+      payModal.style.display = 'flex';
+    };
+  });
+  document.getElementById('pay-close').onclick  = () => { payModal.style.display = 'none'; };
+  document.getElementById('pay-cancel').onclick = () => { payModal.style.display = 'none'; };
+  payModal.onclick = e => { if (e.target === payModal) payModal.style.display = 'none'; };
+
+  document.getElementById('pay-proof-input').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      payProofB64 = ev.target.result;
+      document.getElementById('pay-proof-preview').src = payProofB64;
+      document.getElementById('pay-proof-preview').style.display = 'block';
+      document.getElementById('pay-proof-zone').style.borderColor = 'var(--teal)';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById('pay-confirm').onclick = async () => {
+    const billId = document.getElementById('pay-bill-id').value;
+    try {
+      await PATCH(`/api/bills/${billId}`, { status: 'paid', actioned_by: S.user.id, payment_proof: payProofB64 });
+      payModal.style.display = 'none';
+      showAlert('Bill marked as paid!');
+      showPage('mgr-bills');
+    } catch(e) { showAlert(e.message, 'error'); }
+  };
 }
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
